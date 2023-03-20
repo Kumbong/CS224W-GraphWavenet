@@ -1,3 +1,5 @@
+from functools import reduce
+from operator import mul
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -6,50 +8,72 @@ from torch_geometric.nn import GCNConv
 class SpatialTemporal(nn.Module):
     # in_channels=32
     def __init__(self, in_channels, dilations, out_channels=None, dilation_channels=32, dropout=0.3):
+        super(SpatialTemporal, self).__init__()
+
         self.total_dilation = sum(dilations)
         self.blocks = len(dilations)
 
         self.gate1 = nn.ModuleList()
         self.gate2 = nn.ModuleList()
+        self.gcn_conv = nn.ModuleList()
 
 
         for d in dilations:
-            self.gate1(nn.Conv2d(in_channels=in_channels,
+            self.gate1.append(nn.Conv2d(in_channels=in_channels,
                                     out_channels=dilation_channels,
                                     kernel_size=(1, 2),dilation=d))
             
-            self.gate2(nn.Conv2d(in_channels=in_channels,
+            self.gate2.append(nn.Conv2d(in_channels=in_channels,
                                     out_channels=dilation_channels,
                                     kernel_size=(1, 2),dilation=d))
             
-            self.gcn_conv = GCNConv(in_channels=dilation_channels, out_channels=in_channels)
+            self.gcn_conv.append(GCNConv(in_channels=dilation_channels, out_channels=in_channels))
         
         if out_channels != None:
             self.out = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1))
         
     def forward(self, input, edge_index, edge_weight=None):
-        # (batch_size, residual_channels, num_nodes, t)
+        # (batch_size, t, num_nodes, in_channels)
+        input = input.transpose(-3, -1)
         if self.total_dilation > input.shape[-2]:
-            input = F.pad(input, (0, 0, self.total_dilation - input.shape[-2] + 1, 0))
+            input = F.pad(input, (self.total_dilation - input.shape[-2] + 1, 0))
 
         g1 = input
         g2 = input
 
-        for i in range(len(self.blocks)):
+        for i in range(self.blocks):
             g1 = self.gate1[i](g1)
             g2 = self.gate2[i](g2)
 
-            g1 = F.tanh(g1).transpose(-3, -2)
-            g2 = F.sigmoid(g2).transpose(-3, -2)
+            # (batch_size, dilation_channels, num_nodes, t_cur - d[i])
 
-            # (batch_size, num_nodes,  in_channels, t_cur - d[i])
+            g1 = F.tanh(g1)
+            g1 = g1.transpose(-3, -1)
+            g2 = F.sigmoid(g2)
+            g2 = g2.transpose(-3, -1)
 
-            x = self.gcn_conv(g1 * g2, edge_index, edge_weight).transpose(-3, -2)
+            # (batch_size, t_cur - d[i], num_nodes, dilation_channels)
 
-            # (batch_size, in_channels, num_nodes, t_cur - d[i])
+            gcn_out = None
+            cur_shape = list(g1.shape)
+            batch_size = reduce(mul, cur_shape[:-2])
+            g1 = torch.reshape(g1, (batch_size, cur_shape[-2], cur_shape[-1]))
+            g2 = torch.reshape(g2, (batch_size, cur_shape[-2], cur_shape[-1]))
 
-            g1 = x
-            g2 = x
+            for i in range(len(g1)): 
+                g = self.gcn_conv[i](g1[i] * g2[i], edge_index, edge_weight)
+                if gcn_out == None:
+                    gcn_out = torch.unsqueeze(g, 0)
+                else:
+                    gcn_out = torch.cat(gcn_out, g)
+
+            gcn_out = torch.reshape(gcn_out, tuple(cur_shape[:-1] + [self.gcn_conv[i].out_channels]))
+
+            # (batch_size, t_cur - d[i], num_nodes, in_channels)
+            gcn_out = gcn_out.transpose(-3, -1)
+
+            g1 = gcn_out
+            g2 = gcn_out
 
         # (batch_size, in_channels, num_nodes, t - total_dilation)
         x = input[..., -1] + x[..., -1]
@@ -59,7 +83,8 @@ class SpatialTemporal(nn.Module):
         if self.out != None:
             x = self.out(x)
 
-        # (batch_size, out_channels, num_nodes, 1)  
+        # (batch_size, out_channels, num_nodes, 1)
+        x = x.transpose(-3, -1)  
         return x
         
         
@@ -68,29 +93,80 @@ class SpatialTemporal(nn.Module):
     
 class GraphWaveNet(nn.Module):
     def __init__(self, num_nodes, adj, in_channels, out_channels, out_timestamps, dilations=[1,2,1,2,1,2,1,2], dropout=0.3, residual_channels=32, dilation_channels=32, skip_channels=256, layers=2):
-        self.input = nn.Conv2d(in_features=in_channels, out_features=residual_channels, kernel_size=(1, 1))
+        super(GraphWaveNet, self).__init__()
+        self.input = nn.Conv2d(in_channels=in_channels, out_channels=residual_channels, kernel_size=(1, 1))
+
+        self.adj = adj
+        self.num_nodes = num_nodes
 
         self.spatial_temporals = nn.ModuleList()
         self.bns = nn.ModuleList()
+        self.skip = nn.ModuleList()
         
         for _ in range(layers):
-            self.spatial_temporals.append(SpatialTemporal(residual_channels, dilations, out_channels=skip_channels, dilation_channels=dilation_channels, dropout=dropout))
-            self.bns.append(nn.BatchNorm2d(skip_channels))
+            self.spatial_temporals.append(SpatialTemporal(residual_channels, dilations, dilation_channels=dilation_channels, dropout=dropout))
+            self.skip.append(nn.Conv2d(in_channels=residual_channels, out_channels=skip_channels, kernel_size=(1, 1)))
+            self.bns.append(nn.BatchNorm2d(residual_channels))
 
-        self.end1 = nn.Conv2d(in_features=in_channels, out_features=out_channels, kernel_size=(1, 1))
-        self.end2 = nn.Conv2d(in_features=in_channels, out_features=out_channels, kernel_size=(1, 1))
+        self.end1 = nn.Conv2d(in_channels=skip_channels, out_channels=out_timestamps, kernel_size=(1, 1))
+        self.end2 = nn.Conv2d(in_channels=1, out_channels=out_channels, kernel_size=(1, 1))
 
     def forward(self, x):
         # (batch_size, t, num_nodes, input_dim)
 
-        x = x.transpose(1, 3)
+        edge_list = [[], []]
+        edge_weight = []
+        
+        for i in range(self.num_nodes):
+            for j in range(self.num_nodes):
+                print(self.adj.item((i, j)))
+                if self.adj.item((i, j)) != 0:
+                    edge_list[0].append(i)
+                    edge_list[1].append(j)
+                    edge_weight.append(self.adj.item((i, j)))
+
+
+        x = x.transpose(-3, -1)
 
         # (batch_size, input_dim, num_nodes, t)
         x = self.input(x)
 
+        skip_out = None
+
         # (batch_size, residual_channels, num_nodes, t)
-        for k in len(self.spatial_temporals):
-            x = self.spatial_temporals[k](x)
+        for k in range(len(self.spatial_temporals)):
+            x = x.transpose(-3, -1)
+            # (batch_size, t, num_nodes, residual_channels)
+            x = self.spatial_temporals[k](x, edge_list, edge_weight)
+            # (batch_size, 1, num_nodes, residual_channels) 
+
+            x = x.transpose(-3, -1)
+
+            if skip_out == None:
+                skip_out = self.skip[k](x)
+            else:
+                skip_out += self.skip[k](x)
+
+            x = self.bns[k](x)
+
+        # (batch_size, skip_channels, num_nodes, 1) 
+
+        x = self.end1(skip_out)
+        x = F.relu(x)
+        x = x.transpose(-3, -1)
+
+        # (batch_size, 1, num_nodes, out_timestamps) 
+
+        x = self.end2(x)
+        x = F.relu(x)
+
+        # (batch_size, out_channels, num_nodes, out_timestamps) 
+
+        x = x.transpose(-3, -1)
+        return x
+
+
+
 
 
 
