@@ -4,6 +4,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch_geometric.nn import GCNConv
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
 
 
 class nconv(nn.Module):
@@ -64,8 +66,8 @@ class SpatialTemporal(nn.Module):
                                     out_channels=dilation_channels,
                                     kernel_size=(1, 2),dilation=dilation)
             
-        # self.gcn_conv = GCNConv(in_channels=dilation_channels, out_channels=in_channels)
-        self.gcn_conv = gcn(dilation_channels,in_channels,dropout,support_len=3)
+        self.gcn_conv = GCNConv(in_channels=dilation_channels, out_channels=in_channels)
+        # self.gcn_conv = gcn(dilation_channels,in_channels,dropout,support_len=3)
         
         if out_channels != None:
             self.out = nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=(1, 1))
@@ -85,13 +87,23 @@ class SpatialTemporal(nn.Module):
         g2 = F.sigmoid(g2)
         out1 = g1 * g2
 
+        # gcn_out = self.gcn_conv(g1 * g2, supports)
 
-        gcn_out = self.gcn_conv(g1 * g2, supports)
-
-        """
         # (batch_size, t_cur - d[i], num_nodes, dilation_channels)
         g1 = g1.transpose(-3, -1)
         g2 = g2.transpose(-3, -1)
+        
+        out2 = torch.flatten(g1 * g2, end_dim=-3)
+        edge_index = edge_index.expand(out2.size(0), edge_index.size(-2), edge_index.size(-1))
+        edge_weight = edge_weight.expand(out2.size(0), edge_weight.size(-1)).reshape((out2.size(0), edge_weight.size(-1), 1))
+
+        dataset = [Data(x=x_input, edge_index=e_i, edge_attr=e_w) for x_input, e_i, e_w in zip(out2, edge_index, edge_weight)]
+
+        loader = DataLoader(dataset=dataset, batch_size=out2.size(0))
+
+        data = next(iter(loader))
+
+
         gcn_out = None
         cur_shape = list(g1.shape)
         batch_size = reduce(mul, cur_shape[:-2])
@@ -101,21 +113,25 @@ class SpatialTemporal(nn.Module):
 
 
 
-        for batch in range(len(g1)): 
-            # g = F.dropout(g, p=0.3)
+        """for batch in range(len(g1)): 
+            g = self.gcn_conv(g1[batch] * g2[batch], edge_index, edge_weight)
             if gcn_out == None:
                 gcn_out = torch.unsqueeze(g, 0)
             else:
-                gcn_out = torch.cat([gcn_out, torch.unsqueeze(g, 0)])
+                gcn_out = torch.cat([gcn_out, torch.unsqueeze(g, 0)])"""
+
+        gcn_out = self.gcn_conv(data.x, data.edge_index, edge_weight=torch.flatten(data.edge_attr))
 
         gcn_out = torch.reshape(gcn_out, tuple(cur_shape[:-1] + [self.gcn_conv.out_channels]))
+        gcn_out = F.dropout(gcn_out, p=self.dropout)
+
         
         if self.out != None:
             gcn_out = gcn_out.transpose(-3, -1)
             gcn_out = self.out(gcn_out)
             gcn_out = gcn_out.transpose(-3, -1)  
 
-        """
+        
 
 
         # (batch_size, t_cur - d[i], num_nodes, in_channels)
@@ -192,7 +208,7 @@ class GraphWaveNet(nn.Module):
 
             # (batch_size, t_cur-d, num_nodes, residual_channels) 
 
-            # x = x.transpose(-3, -1)
+            x = x.transpose(-3, -1)
             x = x + residual[..., -x.shape[-1]:]
             x = self.bns[k](x)
 
