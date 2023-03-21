@@ -7,7 +7,7 @@ from torch_geometric.nn import GCNConv
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 
-
+"""
 class nconv(nn.Module):
     def __init__(self):
         super(nconv,self).__init__()
@@ -51,6 +51,7 @@ class gcn(nn.Module):
         # print("after mlp", h.shape)
         h = F.dropout(h, self.dropout, training=self.training)
         return h
+"""
 
 class SpatialTemporal(nn.Module):
     def __init__(self, in_channels, dilation, out_channels=None, dilation_channels=32, dropout=0.3):
@@ -160,6 +161,9 @@ class GraphWaveNet(nn.Module):
         self.bns = nn.ModuleList()
         self.bns2 = nn.BatchNorm2d(skip_channels)
         self.skip = nn.ModuleList()
+
+        self.out_timestamps = out_timestamps
+        self.out_channels = out_channels
         
         for d in dilations:
             self.spatial_temporals.append(SpatialTemporal(residual_channels, d, dilation_channels=dilation_channels, dropout=dropout))
@@ -168,7 +172,7 @@ class GraphWaveNet(nn.Module):
             
 
         self.end_tmp1 = nn.Conv2d(in_channels=skip_channels, out_channels=512, kernel_size=(1, 1))
-        self.end_tmp2 = nn.Conv2d(in_channels=512, out_channels=out_timestamps, kernel_size=(1, 1))
+        self.end_tmp2 = nn.Conv2d(in_channels=512, out_channels=out_channels * out_timestamps, kernel_size=(1, 1))
         self.end1 = nn.Conv2d(in_channels=512, out_channels=out_timestamps, kernel_size=(1, 1))
         self.end2 = nn.Conv2d(in_channels=1, out_channels=out_channels, kernel_size=(1, 1))
 
@@ -222,7 +226,7 @@ class GraphWaveNet(nn.Module):
 
         # (batch_size, skip_channels, num_nodes, 1) 
 
-        x = (self.end_tmp2(F.relu(self.end_tmp1(F.relu(skip_out)))))
+        x = (self.end_tmp2(F.relu(self.end_tmp1(F.relu(skip_out))))).reshape((-1, self.out_timestamps, self.out_channels, self.num_nodes)).transpose(-1, -2)
         """x = F.relu(x)
         x = x.transpose(-3, -1)
 
@@ -236,10 +240,3 @@ class GraphWaveNet(nn.Module):
 
         
         return x
-
-
-
-
-
-
-    
