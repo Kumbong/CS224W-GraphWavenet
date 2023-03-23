@@ -2,26 +2,45 @@ from functools import reduce
 from operator import mul
 import torch
 from torch import nn
+from torch import Tensor
 from torch.nn import functional as F
 from torch_geometric.nn import GCNConv, DenseGCNConv
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
-
+from torch_geometric.typing import Adj, OptTensor
+from typing import List
 
 class GraphWaveNet(nn.Module):
+    r"""GraphWaveNet implementation from the paper `"Graph WaveNet for Deep Spatial-Temporal
+    Graph Modeling" <https://arxiv.org/abs/1906.00121>`.
 
+    Args:
+        num_nodes (int): Number of nodes in the input graph
+        in_channels (int): Size of each hidden sample.
+        out_channels (int, optional): If not set to :obj:`None`, will apply a
+            final linear transformation to convert hidden node embeddings to
+            output size :obj:`out_channels`. (default: :obj:`None`)
+        out_timesteps (int): the number of time steps we are making predictions for
+        dilations (list(int), optional):
+        adaptive_embeddings (int, optional):
+        dropout (float, optional): Dropout probability. (default: :obj:`0.3`)
+        residual_channels (int, optional): number of residual channels
+        dilation_channels (int, optional): number of dilation channels
+        skip_channels (int, optional): size of skip layers
+        end_channels (int, optional): the size of the final linear layers
+    """
     def __init__(self,
-                 num_nodes,
-                 in_channels,
-                 out_channels,
-                 out_timesteps,
-                 dilations=[1, 2, 1, 2, 1, 2, 1, 2],
-                 adptive_embeddings=10,
-                 dropout=0.3,
-                 residual_channels=32,
-                 dilation_channels=32,
-                 skip_channels=256,
-                 end_channels=512):
+                 num_nodes: int,
+                 in_channels: int,
+                 out_channels: int,
+                 out_timesteps: int,
+                 dilations: List[int]=[1, 2, 1, 2, 1, 2, 1, 2],
+                 adptive_embeddings: int=10,
+                 dropout: float=0.3,
+                 residual_channels: int=32,
+                 dilation_channels: int=32,
+                 skip_channels: int=256,
+                 end_channels: int=512):
 
         super(GraphWaveNet, self).__init__()
 
@@ -83,10 +102,18 @@ class GraphWaveNet(nn.Module):
                               out_channels=out_channels * out_timesteps,
                               kernel_size=(1, 1))
 
-    def forward(self, x, edge_index, edge_weight=None):
-        # x -> (*, t, num_nodes, in_channels)
-        # edge_index -> (2, messages)
-        # edge_weight -> (messages)
+    def forward(self,
+        x: Tensor,
+        edge_index: Adj,
+        edge_weight: OptTensor = None,
+    ) -> Tensor:
+        r"""
+        Args:
+            x (torch.Tensor): The input node features.
+            edge_index (torch.Tensor): The edge indices.
+            edge_weight (torch.Tensor, optional): The edge weights (if
+                supported by the underlying GNN layer). (default: :obj:`None`)
+        """
 
         if len(x.size()) == 3:
             x = torch.unsqueeze(x, dim=0)
@@ -173,7 +200,19 @@ class GraphWaveNet(nn.Module):
 
         return x
 
-    def batch_timesteps(self, x, edge_index, edge_weight=None):
+    def batch_timesteps(
+        self, 
+        x,
+        edge_index, 
+        edge_weight=None
+    ) -> Tensor:
+        r"""
+        Args:
+            x (torch.Tensor): The input node features.
+            edge_index (torch.Tensor): The edge indices.
+            edge_weight (torch.Tensor, optional): The edge weights (if
+                supported by the underlying GNN layer). (default: :obj:`None`)
+        """
         edge_index = edge_index.expand(x.size(0), *edge_index.shape)
 
         if edge_weight != None:
